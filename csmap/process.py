@@ -52,6 +52,18 @@ def csmap(dem: np.ndarray, params: CsmapParams) -> np.ndarray:
     return blend
 
 
+def _read_chunk(dem, window) -> np.ndarray:
+    """NoDataをNaNとして読み込む。
+
+    整数型のDEMは NaN を保持できないため float32 に昇格させる。
+    float64 のDEMは精度を落とさないようそのまま扱う。
+    """
+    chunk = dem.read(1, window=window, masked=True)
+    if not np.issubdtype(chunk.dtype, np.floating):
+        chunk = chunk.astype("float32")
+    return chunk.filled(np.nan)
+
+
 def _process_chunk(
     chunk: np.ndarray,
     dst: rasterio.io.DatasetWriter,
@@ -73,6 +85,15 @@ def _process_chunk(
             (params.gf_size + params.gf_sigma) // 2
         ),
     ]  # shape = (4, chunk_size - margin, chunk_size - margin)
+
+    # NoData(NaN)の位置を透明にする。
+    # 削られた縁の幅は入力chunkと出力の形状差から求めるので、
+    # パディングやフィルタサイズの実装が変わっても追従する。
+    out_h, out_w = csmap_chunk_margin_removed.shape[1:]
+    off_y = (chunk.shape[0] - out_h) // 2
+    off_x = (chunk.shape[1] - out_w) // 2
+    nodata_mask = np.isnan(chunk)[off_y : off_y + out_h, off_x : off_x + out_w]
+    csmap_chunk_margin_removed[3, nodata_mask] = 0
 
     if lock is None:
         dst.write(
@@ -142,7 +163,9 @@ def process(
                         if y + chunk_csmap_size > out_height:
                             write_size_y = out_height - y
 
-                        chunk = dem.read(1, window=Window(x, y, chunk_size, chunk_size))
+                        chunk = _read_chunk(
+                            dem, Window(x, y, chunk_size, chunk_size)
+                        )
                         _process_chunk(
                             chunk,
                             dst,
@@ -166,8 +189,8 @@ def process(
                             if y + chunk_csmap_size > out_height:
                                 write_size_y = out_height - y
 
-                            chunk = dem.read(
-                                1, window=Window(x, y, chunk_size, chunk_size)
+                            chunk = _read_chunk(
+                                dem, Window(x, y, chunk_size, chunk_size)
                             )
                             executor.submit(
                                 _process_chunk,
